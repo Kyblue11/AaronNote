@@ -1,6 +1,9 @@
-Here’s a step‑by‑step roadmap to build your offline‑first, cross‑device Notes/TODO app using Expo + SQLite + Supabase. No code—just the sequence and key considerations so you can tackle each phase yourself.
+# AaronNote
+A local‑first, cross‑device Notes/TODO app using Expo + Legend‑State + Supabase.
 
 ---
+## Notes:
+
 Created app by doing the following:
 ```bash
 npx create-expo-app AaronNote
@@ -9,13 +12,15 @@ npm run reset-project
 npx expo start
 ```
 
+---
+
 ## 🏗️ Phase 0: Prerequisites & Planning
 
 1. **Install Tooling**
 
    * Node.js & npm/yarn
    * Expo CLI (`npm install -g expo-cli`)
-   * A Supabase account
+   * Supabase account
    * (Optional) VS Code with relevant React/TypeScript plugins
 
 2. **Define Core Features**
@@ -59,93 +64,99 @@ npx expo start
 
 ---
 
-## 📱 Phase 2: Mobile App Setup (Expo Project)
+## 📱 Phase 2: App Setup (Expo + Legend‑State)
 
-1. **Initialize Expo**
+1. **Initialize Expo Project**
 
-   ```bash
-   expo init notes-app
-   cd notes-app
-   ```
+   As shown above.
 
 2. **Install Dependencies**
 
-   * `expo-sqlite` (local DB)
-   * `@react-native-community/netinfo` (connectivity)
-   * `expo-image-picker` & `expo-document-picker`
-   * Supabase JS client (`@supabase/supabase-js`)
-   * State management: e.g. **Zustand** or Context API
-   * Data‑fetching: **TanStack Query** (React Query)
+   * `npm install @supabase/supabase-js @react-native-async-storage/async-storage react-native-get-random-values` ✅ (completed)
+   * `npm install @legendapp/state` ✅ (completed)
+   * `npm install @legendapp/state/sync-plugins/supabase` ???
+   * `npx expo install expo-image-picker expo-document-picker expo-file-system` ✅ (completed)
+   * `npm install @react-native-community/netinfo` ✅ (completed)
+   * `npm install react-native-url-polyfill` ✅ (completed)
 
-3. **Set Up Local SQLite**
+   **Note**: Use `npx expo install` for Expo-managed packages to ensure SDK compatibility, and `npm install` for regular npm packages.o`
 
-   * Create/open a database on app launch
-   * Execute DDL to create `notes` table with a `dirty_flag` boolean
+3. **Configure Legend‑State + Supabase Sync**
+
+   * Create your Supabase client instance in `src/services/supabase.ts`.
+   * Define synced observables for `notes`:
+
+     ```js
+     import { syncedCollection } from '@legendapp/state/sync-plugins/supabase';
+     export const notes$ = syncedCollection('notes', {
+       client: supabaseClient,
+       persist: { name: 'notes', version: 1 },
+       changesSince: (lastSync) => supabaseClient
+         .from('notes')
+         .select('*')
+         .gt('updated_at', lastSync || 0),
+     });
+     ```
+   * Legend‑State will auto‑persist metadata via AsyncStorage and queue changes offline.
 
 4. **Organize Code Structure**
 
-   * `/src/screens`: NoteList, NoteEditor, AttachmentViewer
-   * `/src/components`: NoteItem, AttachmentItem, SyncStatus
-   * `/src/db`: local DB setup & helper functions
-   * `/src/services`: Supabase client, file‐upload helpers
-   * `/src/hooks`: useNotes (local cache + sync), useConnectivity
+   * `/src/screens`: `NoteList`, `NoteEditor`, `AttachmentViewer`
+   * `/src/components`: `NoteItem`, `AttachmentItem`, `SyncStatus`
+   * `/src/services`: Supabase client, file-upload helpers
+   * `src/state`: Legend‑State observables and sync setup
+   * `/src/hooks`: `useConnectivity`, optional UI hooks
 
 ---
 
-## 🔍 Phase 3: Local CRUD & UI
+## 🔍 Phase 3: UI & CRUD with Legend‑State
 
-1. **Build Note List Screen**
+1. **Note List Screen**
 
-   * Query all notes from SQLite
-   * Display title, snippet, “dirty” indicator
+   * Use `use$` to subscribe to `notes$`
+   * Render title, snippet, and a “dirty” indicator for pending sync
 
-2. **Build Note Editor Screen**
+2. **Note Editor Screen**
 
-   * Form for title + content + attach buttons
+   * Form for title, content, and attachment buttons
    * On save:
 
-     * Insert/update in SQLite, set `dirty_flag = true`, update `updated_at = now()`
-     * Show immediate UI feedback
+     * Mutate `notes$.set(id, { title, content, updated_at: Date.now(), dirty_flag: true })`
+     * UI updates instantly via observables
 
-3. **Attachment Handling**
+3. **Attachment Handling (Offline & Online)**
 
-   * On mobile: use `expo-image-picker` / `expo-document-picker` to pick media
-   * Save local URI & metadata in SQLite (or in-memory until sync)
-   * Preview attachments in editor & list
+   * Pick media using `expo-image-picker` / `expo-document-picker`
+   * Copy file to local storage via `expo-file-system`:
+
+     ```js
+     const localUri = await FileSystem.copyAsync({ from: result.uri, to: `${FileSystem.documentDirectory}${filename}` });
+     ```
+   * Update the note observable with `{ attachments: [..., { uri: localUri, filename, type }] }`
+   * Legend‑State persists the metadata (including local URIs)
 
 ---
 
-## 🔄 Phase 4: Sync Logic & Hooks
+## 🔄 Phase 4: Sync & File Upload Workflow
 
 1. **Connectivity Detection** (`useConnectivity`)
 
-   * Subscribe to NetInfo
-   * Expose `isOnline` boolean
+   * Subscribe to `@react-native-community/netinfo`
+   * Expose `isOnline` boolean to trigger uploads
 
-2. **Sync Hook** (`useSync`)
+2. **File Upload Logic**
 
-   * Trigger on:
+   * Legend‑State sync plugin queues metadata changes, but file binaries need manual upload
+   * On network re‑connect (or app focus):
 
-     * App resume / focus
-     * Connectivity change from offline → online
-     * Manual “Sync Now” button (optional)
-   * **Push** dirty notes:
+     1. Iterate notes with attachments containing local URIs
+     2. Upload each file to Supabase Storage via JS client
+     3. On success, replace `uri` with the public `url` in the observable
 
-     * Read `notes WHERE dirty_flag = true` from SQLite
-     * For each:
+3. **Legend‑State Auto Sync**
 
-       * Upload attachments to Supabase Storage → get URL(s)
-       * Upsert note row via Supabase JS client (Postgres)
-       * On success: clear `dirty_flag` in SQLite
-   * **Pull** remote changes:
-
-     * Query Supabase for notes updated since last sync timestamp
-     * Upsert into SQLite (cover new & updated rows)
-
-3. **Conflict Resolution**
-
-   * Simple “last-write-wins” using `updated_at` timestamps
-   * (Future) flag conflicts for manual merge if two edits coincide
+   * After replacing local URIs, Legend‑State will detect the change and sync updated metadata (including remote URLs) to Supabase
+   * Conflicts are resolved “last-write-wins” based on `updated_at`
 
 ---
 
@@ -153,20 +164,16 @@ npx expo start
 
 1. **Enable Web Target**
 
-   * `expo start --web`
-   * Confirm your UI renders in browser
+   ```bash
+   expo start --web
+   ```
 
-2. **Platform‑Specific Code**
+2. **Unified Codebase**
 
-   * Use `Platform.OS === 'web'` in your hooks/components
-   * **Web**: bypass SQLite & sync hook; read/write directly via Supabase
-   * **Mobile**: continue using local DB + sync
-
-3. **File & Image Upload on Web**
-
-   * Use the same `expo-*` pickers (they work on web)
-   * On web: you’ll get a `File` object or base64 string
-   * Upload directly via Supabase Storage JS API
+   * Use the same Legend‑State observables and React components
+   * On web, pickers return `File` objects or base64 strings via Expo modules
+   * Upload directly to Supabase Storage and update the observable
+   * No offline persistence needed for web—metadata saved remotely and read live
 
 ---
 
@@ -175,33 +182,36 @@ npx expo start
 1. **Error Handling**
 
    * Show UI alerts on upload/download failures
-   * Retry logic for failed syncs
+   * Implement retry logic for failed file uploads or sync operations
 
 2. **Performance**
 
-   * Paginate note list if large
-   * Debounce auto‑sync intervals
+   * Paginate or virtualize long note lists
+   * Debounce rapid state changes to avoid excessive writes
 
 3. **User Feedback**
 
-   * Sync status indicator (last synced time, in‑progress spinner)
-   * Show “offline” banner when no network
+   * Display sync status (e.g., “Last synced: 5 minutes ago”)
+   * Show offline banner when `isOnline === false`
 
 4. **Testing**
 
-   * Simulate offline on mobile: make edits, relaunch, go online → verify sync
-   * Use browser dev‑tools to throttle or cut network on web
+   * Test offline on mobile: create notes and attachments, restart app, reconnect → verify sync
+   * Use browser dev‑tools to throttle network for web scenario
 
 ---
 
 ## 🎯 Phase 7: Future Improvements
 
-* **Authentication** (Supabase Auth) → per‑user data isolation
-* **Collaborative notes** (real‑time updates via Supabase Realtime)
-* **Rich‑text editing** or Markdown support
-* **Push notifications** for updates
-* **Desktop app** via Electron if you need offline on PC
+* **Authentication** (Supabase Auth) → per‑user data isolation via sync plugin filter
+* **Collaborative notes** (real-time via Supabase Realtime plugin)
+* **Rich-text or Markdown editing**
+* **Push notifications** for sync alerts
+* **Desktop offline support** (Electron + Legend‑State)
 
 ---
 
-With this sequence you can methodically build—starting from the backend schema, wiring up local storage + UI, then layering on sync logic, and finally enabling web access. Let me know which phase you’d like to dive into next (e.g. detailed SQLite schema design, syncing pseudocode, or setting up your Supabase project)!
+This workflow leverages Legend‑State for seamless metadata persistence and sync, combined with `expo-file-system` for robust offline file storage. Let me know if you need deep‑dives into any step!
+
+
+---
